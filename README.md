@@ -121,12 +121,3 @@ Main function for HVSR computation with extensive parameter control:
   - `window_hvsr` - Individual window HVSR curves
   - `metadata` - Processing metadata
 
-
-## License
-
-MIT License - see LICENSE file for details.
-
-## Acknowledgments
-
-- SESAME project for HVSR best practices
-- ObsPy community for seismic data tools
