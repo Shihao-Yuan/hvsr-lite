@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hvsr-lite"
+version = "0.1.0"
+authors = [
+    {name = "Shihao Yuan", email = "syuan@mines.edu"},
+]
+description = "Fast, minimal HVSR analysis - pure-core package with advanced smoothing"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=1.20.0",
+    "scipy>=1.7.0",
+    "matplotlib>=3.3.0",
+    "obspy>=1.3.0",
+    "tqdm>=4.60.0",
+    "numba>=0.56.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov",
+    "black",
+    "flake8",
+    "jupyter",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/hvsr-lite"
+Repository = "https://github.com/yourusername/hvsr-lite"
+Issues = "https://github.com/yourusername/hvsr-lite/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hvsr_lite*"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
