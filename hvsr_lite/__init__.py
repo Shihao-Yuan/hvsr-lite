@@ -17,7 +17,7 @@ __author__ = "Shihao Yuan"
 __email__ = "syuan@mines.edu"
 
 # Flat API 
-from .core import compute_hvsr, HVSRResult, compute_hvsr_batch, compute_hvsr_array, compute_hvsr_parallel  # noqa: F401
+from .core import compute_hvsr, HVSRResult, compute_hvsr_batch, compute_hvsr_array  # noqa: F401
 
 # Notebook utilities
 from .utils import stream_to_dict  # noqa: F401
@@ -31,6 +31,5 @@ __all__ = [
     "HVSRResult",
     "compute_hvsr_batch",
     "compute_hvsr_array", 
-    "compute_hvsr_parallel",
     "stream_to_dict",
 ]
