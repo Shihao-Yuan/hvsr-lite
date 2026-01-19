@@ -9,7 +9,7 @@ DISCLAIMER: This is a development build. The code may contain errors or unstable
 try:
     # Python >=3.7
     from dataclasses import dataclass
-except ImportError as e:  # pragma: no cover
+except ImportError as e: 
     raise ImportError(
         "Missing 'dataclasses'. Use Python >= 3.7 (project requires >= 3.10) "
         "or install the backport: `pip install dataclasses`."
@@ -30,7 +30,6 @@ except ImportError:
     NUMBA_AVAILABLE = False
     warnings.warn("Numba not available. Install with 'pip install numba' for acceleration.")
     
-    # Fallback decorators
     def jit(*args, **kwargs):
         def decorator(func):
             return func
@@ -70,7 +69,7 @@ def custom_konno_ohmachi_smoothing(data, freqs, bandwidth=40.0):
     # Pre-allocate output
     smoothed = np.zeros_like(data)
     
-    # Use true Konno-Ohmachi kernel (not sinc approximation)
+    # Use Konno-Ohmachi kernel with proper normalization
     for i, fc in enumerate(freqs):
         # KO kernel: [sin(b * log10(f/fc)) / (b * log10(f/fc))]^4
         # Avoid division by zero at fc
@@ -154,7 +153,7 @@ def konno_ohmachi_smoothing_to_centers(
 
 # Progress bar support
 try:
-    from tqdm import tqdm
+    from tqdm.auto import tqdm
 except ImportError:
     # Fallback if tqdm not available
     def tqdm(iterable, desc=None, **kwargs):
@@ -205,7 +204,6 @@ def _sta_lta_ratio_max_numba(x: np.ndarray, sta_samples: int, lta_samples: int) 
     if n < lta_samples or lta_samples <= sta_samples:
         return np.inf
     
-    # Use absolute values
     ax = np.abs(x)
     
     # Initialize: LTA from first lta_samples
@@ -233,9 +231,6 @@ def _sta_lta_ratio_max_numba(x: np.ndarray, sta_samples: int, lta_samples: int) 
         lta_sum = lta_sum + ax[i] - ax[i - lta_samples]
         lta_mean = lta_sum / lta_samples
         
-        # Update STA: it's always the last sta_samples of the current LTA window
-        # Remove the sample that just left the LTA window (if it was in STA)
-        # and add the new sample at the end
         sta_sum = sta_sum + ax[i] - ax[i - sta_samples]
         sta_mean = sta_sum / sta_samples
         
@@ -346,20 +341,16 @@ def compute_hvsr(
         v_win = v[sl].astype(float)
 
         # STA/LTA window rejection
-        # Use sliding-window method to catch transients anywhere in the window
-        # Check all three components and use maximum ratio
         sta = int(max(1, sta_window_seconds * sampling_rate))
         lta = int(max(sta+1, lta_window_seconds * sampling_rate))
         
         if NUMBA_AVAILABLE:
-            # Use sliding-window method to catch transients anywhere
             ratios = [
                 _sta_lta_ratio_max_numba(n_win, sta, lta),
                 _sta_lta_ratio_max_numba(e_win, sta, lta),
                 _sta_lta_ratio_max_numba(v_win, sta, lta)
             ]
         else:
-            # Fallback: sliding-window implementation in pure numpy
             def _sta_lta_ratio_max(x, sta_samples, lta_samples):
                 n = len(x)
                 if n < lta_samples or lta_samples <= sta_samples:
@@ -400,14 +391,12 @@ def compute_hvsr(
             continue
         
         # Maximum Value Window Rejection
-        # Check if maximum amplitude exceeds threshold (with optional normalization)
         if maximum_value_threshold is not None:
             components = [n_win, e_win, v_win]
             reject_max_value = False
             
             for comp in components:
                 if maximum_value_normalized:
-                    # Normalize by standard deviation (common in seismic processing)
                     comp_std = np.std(comp)
                     if comp_std > 1e-12:
                         comp_normalized = comp / comp_std
@@ -425,10 +414,10 @@ def compute_hvsr(
             if reject_max_value:
                 rejected += 1
                 continue
-        # Amplitude-based rejection (supports constant, window-adaptive, and global-cap modes)
+        # Amplitude-based rejection 
         threshold_limit = None
         if amplitude_threshold_factor is not None:
-            # Robust per-window limit based on MAD of vertical component
+            
             v_med = np.median(v_win)
             v_mad = np.median(np.abs(v_win - v_med))
             # Fallback to std if MAD is ~0 
@@ -465,10 +454,7 @@ def compute_hvsr(
 
         h_asd = _combine_horizontal_from_amplitudes(n_asd, e_asd, horizontal_combine)
 
-        # guard against tiny V - more robust floor
-        # eps = max(1e-12, np.percentile(v_asd, 10) * 1e-2)  # Use 10th percentile, larger factor
-        # eps = max(1e-8, np.percentile(v_asd, 20) * 0.2)
-        ratio = h_asd / v_asd #np.maximum(v_asd, eps)
+        ratio = h_asd / v_asd 
 
         hvsr_matrix.append(ratio)
         h_amp_matrix.append(h_asd)
@@ -504,13 +490,12 @@ def compute_hvsr(
     h_amp_matrix = h_amp_matrix[:, mask]
     v_amp_matrix = v_amp_matrix[:, mask]
 
-    # Stack across windows (compute several; choose primary via `stacking`)
+    # Stack across windows
     hvsr_med = np.median(hvsr_matrix, axis=0)
     hvsr_mean = np.mean(hvsr_matrix, axis=0)
     hvsr_std = np.std(hvsr_matrix, axis=0)
 
     # Log-mean (geometric mean) across windows
-    # Compute on linear ratios with a small floor for numerical safety.
     _eps = 1e-20
     log_hvsr = np.log(np.maximum(hvsr_matrix, _eps))
     hvsr_logmean = np.exp(np.mean(log_hvsr, axis=0))
@@ -518,13 +503,9 @@ def compute_hvsr(
     H_med = np.median(h_amp_matrix, axis=0)
     V_med = np.median(v_amp_matrix, axis=0)
 
-    # Smooth ratio only (form ratio first, then smooth)
-    # This avoids Jensen's inequality bias from smoothing H and V separately
-    #
-    # If `ko_center_frequencies` is provided, evaluate smoothing at those centers.
+    # Smooth ratio only
     if ko_center_frequencies is not None:
         centers = np.asarray(ko_center_frequencies, dtype=float)
-        # keep only centers within the masked band
         centers = centers[(centers >= f[0]) & (centers <= f[-1])]
         if len(centers) == 0:
             raise ValueError("ko_center_frequencies has no values inside the usable frequency band")
@@ -534,7 +515,6 @@ def compute_hvsr(
         hvsr_std_smooth = konno_ohmachi_smoothing_to_centers(hvsr_std, f, centers, bandwidth=ko_bandwidth)
         hvsr_logmean_smooth = konno_ohmachi_smoothing_to_centers(hvsr_logmean, f, centers, bandwidth=ko_bandwidth)
 
-        # Also evaluate H and V spectra on this grid for consistency
         H_med_s = konno_ohmachi_smoothing_to_centers(H_med, f, centers, bandwidth=ko_bandwidth)
         V_med_s = konno_ohmachi_smoothing_to_centers(V_med, f, centers, bandwidth=ko_bandwidth)
 
@@ -725,8 +705,6 @@ def compute_hvsr_array(
         }
         stations_data.append(station_data)
     
-    # Process in parallel
     results_list = compute_hvsr_batch(stations_data, n_workers, use_threading, **kwargs)
     
-    # Convert to dictionary format
     return dict(results_list)
