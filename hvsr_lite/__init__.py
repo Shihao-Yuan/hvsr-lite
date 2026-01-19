@@ -15,22 +15,18 @@ Contributions and feedback are welcome.
 __version__ = "0.1.0"
 __author__ = "Shihao Yuan"
 __email__ = "syuan@mines.edu"
+ 
+from .core import compute_hvsr, HVSRResult, compute_hvsr_batch, compute_hvsr_array 
 
-# Flat API 
-from .core import compute_hvsr, HVSRResult, compute_hvsr_batch, compute_hvsr_array, compute_hvsr_parallel  # noqa: F401
+from .utils import stream_to_dict 
 
-# Notebook utilities
-from .utils import stream_to_dict  # noqa: F401
-
-# Back-compat soft-exports (kept only if present)
-BatchProcessor = None  # type: ignore
-NodalArray = None  # type: ignore
+BatchProcessor = None  
+NodalArray = None  
 
 __all__ = [
     "compute_hvsr",
     "HVSRResult",
     "compute_hvsr_batch",
     "compute_hvsr_array", 
-    "compute_hvsr_parallel",
     "stream_to_dict",
 ]

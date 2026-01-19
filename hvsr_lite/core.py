@@ -6,20 +6,22 @@ Author: Shihao Yuan (syuan@mines.edu)
 DISCLAIMER: This is a development build. The code may contain errors or unstable functionality.
 """
 
-from dataclasses import dataclass
+try:
+    # Python >=3.7
+    from dataclasses import dataclass
+except ImportError as e: 
+    raise ImportError(
+        "Missing 'dataclasses'. Use Python >= 3.7 (project requires >= 3.10) "
+        "or install the backport: `pip install dataclasses`."
+    ) from e
 import numpy as np
-from scipy.signal import periodogram, welch, detrend
-from scipy.signal.windows import tukey
+from scipy.signal import periodogram, welch
 from scipy.ndimage import uniform_filter1d
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from multiprocessing import cpu_count
-from typing import List, Dict, Any, Tuple, Optional, Union
+from typing import List, Dict, Any, Tuple, Optional
 import warnings
 
-try:
-    from obspy.signal.konnoohmachismoothing import konno_ohmachi_smoothing as obspy_ko_smoothing
-except Exception:
-    obspy_ko_smoothing = None
 
 try:
     from numba import jit, prange
@@ -28,7 +30,6 @@ except ImportError:
     NUMBA_AVAILABLE = False
     warnings.warn("Numba not available. Install with 'pip install numba' for acceleration.")
     
-    # Fallback decorators
     def jit(*args, **kwargs):
         def decorator(func):
             return func
@@ -38,9 +39,12 @@ except ImportError:
         return range(*args)
 
 # Custom KO implementation to fix ObsPy issues
-def custom_konno_ohmachi_smoothing(data, freqs, bandwidth=40.0, method='improved'):
+def custom_konno_ohmachi_smoothing(data, freqs, bandwidth=40.0):
     """
     Custom Konno-Ohmachi smoothing with improved edge handling.
+    
+    Uses the true Konno-Ohmachi kernel: [sin(b * log10(f/fc)) / (b * log10(f/fc))]^4
+    with proper singularity handling and normalization.
     
     Parameters:
     -----------
@@ -49,31 +53,12 @@ def custom_konno_ohmachi_smoothing(data, freqs, bandwidth=40.0, method='improved
     freqs : array-like  
         Frequency array corresponding to data
     bandwidth : float
-        Konno-Ohmachi bandwidth parameter
-    method : str
-        Method to use: 'improved', 'smooth', 'robust', 'hybrid'
+        Konno-Ohmachi bandwidth parameter (default: 40.0)
     
     Returns:
     --------
     smoothed_data : ndarray
         Smoothed data
-    """
-    
-    if method == 'improved':
-        return _improved_ko(data, freqs, bandwidth)
-    elif method == 'smooth':
-        return _high_smoothness_ko(data, freqs, bandwidth)
-    elif method == 'robust':
-        return _robust_ko(data, freqs, bandwidth)
-    elif method == 'hybrid':
-        return _hybrid_ko(data, freqs, bandwidth)
-    else:
-        raise ValueError(f"Unknown method: {method}")
-
-def _improved_ko(data, freqs, bandwidth):
-    """
-    Improved KO with better edge handling and normalization.
-    Uses true Konno-Ohmachi kernel for comparable smoothing to ObsPy.
     """
     data = np.asarray(data, dtype=float)
     freqs = np.asarray(freqs, dtype=float)
@@ -84,7 +69,7 @@ def _improved_ko(data, freqs, bandwidth):
     # Pre-allocate output
     smoothed = np.zeros_like(data)
     
-    # Use true Konno-Ohmachi kernel (not sinc approximation)
+    # Use Konno-Ohmachi kernel with proper normalization
     for i, fc in enumerate(freqs):
         # KO kernel: [sin(b * log10(f/fc)) / (b * log10(f/fc))]^4
         # Avoid division by zero at fc
@@ -99,10 +84,6 @@ def _improved_ko(data, freqs, bandwidth):
             # True KO kernel
             kernel[non_zero] = (np.sin(arg) / arg) ** 4
         
-        # Apply conservative edge tapering (less aggressive than before)
-        edge_taper = _get_conservative_edge_taper(len(freqs), i, bandwidth)
-        kernel *= edge_taper
-        
         # Normalize kernel
         kernel_sum = np.sum(kernel)
         if kernel_sum > 0:
@@ -113,174 +94,66 @@ def _improved_ko(data, freqs, bandwidth):
     
     return smoothed
 
-def _high_smoothness_ko(data, freqs, bandwidth):
+
+def konno_ohmachi_smoothing_to_centers(
+    data: np.ndarray,
+    freqs: np.ndarray,
+    center_frequencies: np.ndarray,
+    bandwidth: float = 40.0,
+) -> np.ndarray:
     """
-    High-smoothness KO implementation that matches ObsPy smoothness levels.
+    Konno-Ohmachi smoothing evaluated at arbitrary center frequencies.
+
+    This is useful when you want to report a smoothed spectrum on a
+    user-specified frequency grid (instead of the native FFT grid).
+
+    Parameters
+    ----------
+    data : ndarray
+        Input spectrum values defined on `freqs`.
+    freqs : ndarray
+        Frequency grid for `data`.
+    center_frequencies : ndarray
+        Center frequencies (Hz) at which to evaluate the smoothed spectrum.
+    bandwidth : float
+        Konno-Ohmachi bandwidth parameter.
+
+    Returns
+    -------
+    ndarray
+        Smoothed spectrum evaluated at `center_frequencies`.
     """
     data = np.asarray(data, dtype=float)
     freqs = np.asarray(freqs, dtype=float)
-    
+    centers = np.asarray(center_frequencies, dtype=float)
+
     if len(data) != len(freqs):
         raise ValueError("Data and frequency arrays must have same length")
-    
-    # Pre-allocate output
-    smoothed = np.zeros_like(data)
-    
-    # Use enhanced KO kernel with better smoothing
-    for i, fc in enumerate(freqs):
+
+    out = np.zeros_like(centers, dtype=float)
+
+    # Evaluate KO kernel on the original frequency grid for each target center
+    for i, fc in enumerate(centers):
+        if fc <= 0:
+            out[i] = np.nan
+            continue
         log_ratio = np.log10(freqs / fc)
-        
-        # Handle the singularity at f = fc
         kernel = np.ones_like(freqs)
         non_zero = np.abs(log_ratio) > 1e-10
-        
         if np.any(non_zero):
             arg = bandwidth * log_ratio[non_zero]
-            # True KO kernel with enhanced smoothing
             kernel[non_zero] = (np.sin(arg) / arg) ** 4
-        
-        # Apply minimal edge tapering for maximum smoothness
-        edge_taper = _get_minimal_edge_taper(len(freqs), i)
-        kernel *= edge_taper
-        
-        # Normalize kernel
         kernel_sum = np.sum(kernel)
         if kernel_sum > 0:
             kernel /= kernel_sum
-        
-        # Apply kernel
-        smoothed[i] = np.sum(data * kernel)
-    
-    return smoothed
+        out[i] = np.sum(data * kernel)
 
-def _get_minimal_edge_taper(length, center_idx):
-    """Create minimal edge tapering for maximum smoothness."""
-    taper = np.ones(length)
-    
-    # Only taper at the very edges (2% instead of 5%)
-    edge_fraction = 0.02
-    edge_samples = max(1, int(length * edge_fraction))
-    
-    # Left edge taper
-    if center_idx < edge_samples:
-        taper[:edge_samples] = 0.8 + 0.2 * np.cos(np.pi * (1 - np.arange(edge_samples) / edge_samples))
-    
-    # Right edge taper  
-    if center_idx >= length - edge_samples:
-        taper[-edge_samples:] = 0.8 + 0.2 * np.cos(np.pi * np.arange(edge_samples) / edge_samples)
-    
-    return taper
-
-def _get_conservative_edge_taper(length, center_idx, bandwidth):
-    """Create conservative edge tapering (less aggressive than original)."""
-    taper = np.ones(length)
-    
-    # Only taper near the very edges (5% instead of 10%)
-    edge_fraction = 0.05
-    edge_samples = max(1, int(length * edge_fraction))
-    
-    # Left edge taper
-    if center_idx < edge_samples:
-        # Gentler taper (cosine instead of linear)
-        taper_vals = 0.5 + 0.5 * np.cos(np.pi * (1 - np.arange(edge_samples) / edge_samples))
-        taper[:edge_samples] = taper_vals
-    
-    # Right edge taper  
-    if center_idx >= length - edge_samples:
-        taper_vals = 0.5 + 0.5 * np.cos(np.pi * np.arange(edge_samples) / edge_samples)
-        taper[-edge_samples:] = taper_vals
-    
-    return taper
-
-def _robust_ko(data, freqs, bandwidth):
-    """Robust KO with outlier protection and adaptive bandwidth."""
-    data = np.asarray(data)
-    freqs = np.asarray(freqs)
-    
-    # Remove outliers first
-    data_robust = _remove_outliers(data)
-    
-    # Apply improved KO
-    smoothed = _improved_ko(data_robust, freqs, bandwidth)
-    
-    # Post-process to prevent extreme values
-    smoothed = _clamp_extreme_values(smoothed, data)
-    
-    return smoothed
-
-def _hybrid_ko(data, freqs, bandwidth):
-    """Hybrid approach: KO + moving average combination."""
-    data = np.asarray(data)
-    freqs = np.asarray(freqs)
-    
-    # Get KO result
-    ko_result = _improved_ko(data, freqs, bandwidth)
-    
-    # Get moving average result
-    ma_result = uniform_filter1d(data, size=3, mode='nearest')
-    
-    # Create frequency-dependent weights
-    # Favor KO at low frequencies, MA at high frequencies
-    weights = _get_frequency_weights(freqs)
-    
-    # Combine results
-    hybrid = weights * ko_result + (1 - weights) * ma_result
-    
-    return hybrid
-
-
-def _remove_outliers(data, threshold=3.0):
-    """Remove outliers using robust statistics."""
-    median = np.median(data)
-    mad = np.median(np.abs(data - median))
-    
-    # Robust threshold
-    robust_threshold = threshold * 1.4826 * mad
-    
-    # Clip outliers
-    clipped = np.clip(data, median - robust_threshold, median + robust_threshold)
-    
-    return clipped
-
-def _clamp_extreme_values(smoothed, original):
-    """Prevent extreme values in smoothed data."""
-    # Calculate reasonable bounds based on original data
-    data_range = np.max(original) - np.min(original)
-    upper_bound = np.max(original) + 0.5 * data_range
-    lower_bound = max(0, np.min(original) - 0.2 * data_range)
-    
-    # Clamp smoothed data
-    clamped = np.clip(smoothed, lower_bound, upper_bound)
-    
-    return clamped
-
-def _get_frequency_weights(freqs):
-    """Create frequency-dependent weights for hybrid smoothing."""
-    # Favor KO at low frequencies, MA at high frequencies
-    weights = np.ones_like(freqs)
-    
-    # Transition around 2 Hz
-    transition_freq = 2.0
-    
-    # Linear transition
-    high_freq_mask = freqs > transition_freq
-    low_freq_mask = freqs < transition_freq * 0.5
-    
-    weights[low_freq_mask] = 1.0  # Full KO weight
-    weights[high_freq_mask] = 0.3  # Reduced KO weight
-    
-    # Smooth transition
-    transition_mask = (freqs >= transition_freq * 0.5) & (freqs <= transition_freq)
-    if np.any(transition_mask):
-        transition_weights = np.linspace(1.0, 0.3, np.sum(transition_mask))
-        weights[transition_mask] = transition_weights
-    
-    return weights
+    return out
 
 
 # Progress bar support
 try:
-    from tqdm import tqdm
+    from tqdm.auto import tqdm
 except ImportError:
     # Fallback if tqdm not available
     def tqdm(iterable, desc=None, **kwargs):
@@ -302,27 +175,75 @@ class HVSRResult:
     hvsr_std: np.ndarray | None = None
 
 @jit(nopython=True, cache=True)
-def _sta_lta_ratio_numba(x: np.ndarray, sta_samples: int, lta_samples: int) -> float:
-    """Numba-accelerated STA/LTA ratio calculation."""
+def _sta_lta_ratio_max_numba(x: np.ndarray, sta_samples: int, lta_samples: int) -> float:
+    """Numba-accelerated sliding-window STA/LTA ratio calculation.
+    
+    Calculates the maximum STA/LTA ratio across the entire window using a sliding window.
+    This catches transients anywhere in the window.
+    
+    The sliding window approach:
+    - LTA window slides through the entire signal
+    - STA is always computed from the last sta_samples within the current LTA window
+    - Returns the maximum ratio found anywhere in the window
+    
+    Parameters:
+    -----------
+    x : np.ndarray
+        Window data
+    sta_samples : int
+        Number of samples for STA window
+    lta_samples : int
+        Number of samples for LTA window
+        
+    Returns:
+    --------
+    max_ratio : float
+        Maximum STA/LTA ratio found anywhere in the window
+    """
     n = len(x)
-    if n < lta_samples:
+    if n < lta_samples or lta_samples <= sta_samples:
         return np.inf
     
-    # Calculate LTA (Long Term Average)
+    ax = np.abs(x)
+    
+    # Initialize: LTA from first lta_samples
     lta_sum = 0.0
-    for i in range(n - lta_samples, n):
-        lta_sum += abs(x[i])
+    for i in range(lta_samples):
+        lta_sum += ax[i]
     lta_mean = lta_sum / lta_samples
     
-    # Calculate STA (Short Term Average)
+    # Initial STA from the last sta_samples of the initial LTA window
     sta_sum = 0.0
-    for i in range(n - sta_samples, n):
-        sta_sum += abs(x[i])
+    for i in range(lta_samples - sta_samples, lta_samples):
+        sta_sum += ax[i]
     sta_mean = sta_sum / sta_samples
     
+    # Calculate initial ratio
     if lta_mean < 1e-12:
-        return np.inf
-    return sta_mean / lta_mean
+        max_ratio = np.inf
+    else:
+        max_ratio = sta_mean / lta_mean
+    
+    # Slide the LTA window through the entire signal
+    # At each position, STA is computed from the last sta_samples within the current LTA window
+    for i in range(lta_samples, n):
+        # Update LTA: remove oldest sample, add newest
+        lta_sum = lta_sum + ax[i] - ax[i - lta_samples]
+        lta_mean = lta_sum / lta_samples
+        
+        sta_sum = sta_sum + ax[i] - ax[i - sta_samples]
+        sta_mean = sta_sum / sta_samples
+        
+        # Calculate ratio and track maximum
+        if lta_mean < 1e-12:
+            current_ratio = np.inf
+        else:
+            current_ratio = sta_mean / lta_mean
+        
+        if current_ratio > max_ratio:
+            max_ratio = current_ratio
+    
+    return max_ratio
 
 @jit(nopython=True, cache=True)
 def _combine_horizontal_from_amplitudes_numba(h_amp_n: np.ndarray, h_amp_e: np.ndarray, mode: int) -> np.ndarray:
@@ -350,29 +271,34 @@ def compute_hvsr(
     sampling_rate,
     window_length: float = 60.0,
     overlap: float = 0.66,
-    smoothing_window: int = 5,
     *,
-    stack_method: str = "window_ratio_median",    # "window_ratio_median" | "welch_ratio"
     horizontal_combine: str = "quadratic_mean",   # "quadratic_mean" | "geometric_mean"
-    smoothing_method: str = "custom_ko",          # "custom_ko" | "custom_ko_smooth" | "moving_average" | "konno_ohmachi"
-    ko_bandwidth: float = 40.0,  # Optimal balance of smoothing and performance
-    # QC
-    sta_lta_ratio_threshold: float = 2.0,
+    ko_bandwidth: float = 40.0,  # Konno-Ohmachi smoothing bandwidth parameter
+    # QC - STA/LTA
+    sta_lta_ratio_threshold: float = 2.5,     # Maximum STA/LTA ratio
+    min_sta_lta_ratio: float = 0.2,           # Minimum STA/LTA ratio
+    sta_window_seconds: float = 1.0,          # STA window duration in seconds
+    lta_window_seconds: float = 30.0,         # LTA window duration in seconds
+    # QC - Maximum Value Window Rejection
+    maximum_value_threshold: float | None = None,  # Maximum (optionally normalized) amplitude threshold
+    maximum_value_normalized: bool = True,     # Whether to normalize before checking
+    # Legacy amplitude thresholding (kept for backward compatibility)
     max_amplitude_threshold: float | None = None,
+    # Adaptive amplitude thresholding
+    amplitude_threshold_factor: float | None = None,   # k_local multiplier for MAD(v_win)
+    amplitude_global_cap: float | None = None,         # optional global cap (scalar)
     # Processing toggles
     window_smoothing: bool = False,               # let KO handle final smoothing
     window_smoothing_window: int = 3,
-    detrend_windows: bool = True,
-    remove_mean: bool = True,
+    # Stacking / reporting
+    stacking: str = "logmean",                     # "median" | "mean" | "logmean" (geometric mean)
+    ko_center_frequencies: np.ndarray | None = None,  # evaluate KO at these centers (Hz)
     # Frequency limits
     min_frequency: float = 0.1,
     max_frequency: float | None = None,
     max_frequency_ratio: float = 0.25,  # Reduced from 0.35 to 0.25 (25% of Nyquist)
-    frequency_taper: bool = False,  # Disable frequency tapering by default to avoid sharp drops
-    anti_aliasing_filter: bool = True,
     # PSD engine for per-window spectra
     per_window_engine: str = "periodogram",       # "periodogram" | "welch"
-    notch_lines_hz: tuple[float, ...] = ()
 ):
 
     nperseg = int(window_length * sampling_rate)
@@ -400,51 +326,12 @@ def compute_hvsr(
     if n_windows <= 0:
         raise ValueError("No complete windows could be formed with the given window_length and overlap")
 
-    # helper: optional simple IIR notch (skip if none)
-    def _apply_notches(x):
-        if not notch_lines_hz:
-            return x
-        from scipy.signal import iirnotch, filtfilt
-        y = x.copy()
-        fs = sampling_rate
-        for f0 in notch_lines_hz:
-            if 0 < f0 < fs/2:
-                b, a = iirnotch(f0, Q=30, fs=fs)
-                y = filtfilt(b, a, y)
-        return y
-
-    # helper: apply frequency tapering to reduce high-frequency noise
-    def _apply_frequency_taper(amp, freq, max_freq_ratio):
-        if not frequency_taper:
-            return amp
-        
-        # Use the actual frequency range, not theoretical limits
-        freq_max = freq[-1]  # Actual maximum frequency in our data
-        # Start tapering much later (at 90% instead of 70%) and use gentler taper
-        taper_start = freq_max * 0.9  # Start tapering at 90% of actual max frequency
-        taper_mask = freq > taper_start
-        
-        if np.any(taper_mask):
-            taper_weights = np.ones_like(amp)
-            taper_range = freq[taper_mask]
-            # Much gentler cosine taper from 1 to 0.7 (instead of 0.1)
-            # This prevents the sharp drop while still reducing high-freq noise
-            taper_weights[taper_mask] = 0.7 + 0.3 * 0.5 * (1 + np.cos(np.pi * (taper_range - taper_start) / (freq_max - taper_start)))
-            amp = amp * taper_weights
-            
-        return amp
-
     # window loop
     f_ref = None
     hvsr_matrix = []
     h_amp_matrix = []
     v_amp_matrix = []
     rejected = 0
-    from scipy.signal import butter, filtfilt
-    if anti_aliasing_filter:
-        nyq = sampling_rate/2
-        # More aggressive anti-aliasing filter (6th order, 0.6*nyq cutoff)
-        b_lp, a_lp = butter(6, 0.6, btype='low')  # normalized (0.6*nyq)
 
     # Progress bar for window processing
     for start in tqdm(range(0, N - nperseg + 1, step), desc="Processing windows", unit="win", disable=False):
@@ -453,57 +340,104 @@ def compute_hvsr(
         e_win = east_data[sl].astype(float)
         v_win = v[sl].astype(float)
 
-        # simple STA/LTA-like check
-        sta = int(max(1, 1.0 * sampling_rate))
-        lta = int(max(sta+1, 10.0 * sampling_rate))
+        # STA/LTA window rejection
+        sta = int(max(1, sta_window_seconds * sampling_rate))
+        lta = int(max(sta+1, lta_window_seconds * sampling_rate))
         
         if NUMBA_AVAILABLE:
-            max_ratio = max(
-                _sta_lta_ratio_numba(n_win, sta, lta),
-                _sta_lta_ratio_numba(e_win, sta, lta),
-                _sta_lta_ratio_numba(v_win, sta, lta)
-            )
+            ratios = [
+                _sta_lta_ratio_max_numba(n_win, sta, lta),
+                _sta_lta_ratio_max_numba(e_win, sta, lta),
+                _sta_lta_ratio_max_numba(v_win, sta, lta)
+            ]
         else:
-            def _sta_lta_ratio(x, sta_s=1.0, lta_s=10.0):
-                sta = int(max(1, sta_s * sampling_rate))
-                lta = int(max(sta+1, lta_s * sampling_rate))
-                if len(x) < lta: return np.inf
-                return np.mean(np.abs(x[-sta:])) / max(1e-12, np.mean(np.abs(x[-lta:])))
+            def _sta_lta_ratio_max(x, sta_samples, lta_samples):
+                n = len(x)
+                if n < lta_samples or lta_samples <= sta_samples:
+                    return np.inf
+                ax = np.abs(x)
+                lta_sum = np.sum(ax[:lta_samples])
+                sta_sum = np.sum(ax[lta_samples - sta_samples:lta_samples])
+                lta_mean = lta_sum / lta_samples
+                if lta_mean < 1e-12:
+                    max_ratio = np.inf
+                else:
+                    max_ratio = (sta_sum / sta_samples) / lta_mean
+                for i in range(lta_samples, n):
+                    lta_sum += ax[i] - ax[i - lta_samples]
+                    sta_sum += ax[i] - ax[i - sta_samples]
+                    lta_mean = lta_sum / lta_samples
+                    if lta_mean < 1e-12:
+                        current_ratio = np.inf
+                    else:
+                        current_ratio = (sta_sum / sta_samples) / lta_mean
+                    if current_ratio > max_ratio:
+                        max_ratio = current_ratio
+                return max_ratio
             
-            max_ratio = max(_sta_lta_ratio(n_win), _sta_lta_ratio(e_win), _sta_lta_ratio(v_win))
-        if max_ratio > sta_lta_ratio_threshold:
+            ratios = [
+                _sta_lta_ratio_max(n_win, sta, lta),
+                _sta_lta_ratio_max(e_win, sta, lta),
+                _sta_lta_ratio_max(v_win, sta, lta)
+            ]
+        
+        max_ratio = max(ratios)
+        min_ratio = min(ratios)
+        
+        # Two-sided STA/LTA check
+        # Reject if ratio is outside [min_sta_lta_ratio, sta_lta_ratio_threshold]
+        if max_ratio > sta_lta_ratio_threshold or min_ratio < min_sta_lta_ratio:
             rejected += 1
             continue
+        
+        # Maximum Value Window Rejection
+        if maximum_value_threshold is not None:
+            components = [n_win, e_win, v_win]
+            reject_max_value = False
+            
+            for comp in components:
+                if maximum_value_normalized:
+                    comp_std = np.std(comp)
+                    if comp_std > 1e-12:
+                        comp_normalized = comp / comp_std
+                        comp_max_normalized = np.max(np.abs(comp_normalized))
+                    else:
+                        comp_max_normalized = 0.0
+                else:
+                    # Use raw maximum absolute value
+                    comp_max_normalized = np.max(np.abs(comp))
+                
+                if comp_max_normalized > maximum_value_threshold:
+                    reject_max_value = True
+                    break
+            
+            if reject_max_value:
+                rejected += 1
+                continue
+        # Amplitude-based rejection 
+        threshold_limit = None
+        if amplitude_threshold_factor is not None:
+            
+            v_med = np.median(v_win)
+            v_mad = np.median(np.abs(v_win - v_med))
+            # Fallback to std if MAD is ~0 
+            v_scale = 1.4826 * v_mad if v_mad > 0 else np.std(v_win)
+            local_limit = amplitude_threshold_factor * max(1e-12, v_scale)
+            threshold_limit = local_limit
         if max_amplitude_threshold is not None:
-            if max(np.max(np.abs(n_win)), np.max(np.abs(e_win)), np.max(np.abs(v_win))) > max_amplitude_threshold:
+            threshold_limit = max_amplitude_threshold if threshold_limit is None else min(threshold_limit, max_amplitude_threshold)
+        if amplitude_global_cap is not None:
+            threshold_limit = amplitude_global_cap if threshold_limit is None else min(threshold_limit, amplitude_global_cap)
+        if threshold_limit is not None:
+            if max(np.max(np.abs(n_win)), np.max(np.abs(e_win)), np.max(np.abs(v_win))) > threshold_limit:
                 rejected += 1
                 continue
 
-        # hygiene
-        if remove_mean:
-            n_win -= np.mean(n_win); e_win -= np.mean(e_win); v_win -= np.mean(v_win)
-        if detrend_windows:
-            n_win = detrend(n_win, type='linear')
-            e_win = detrend(e_win, type='linear')
-            v_win = detrend(v_win, type='linear')
-
-        # optional notches
-        if notch_lines_hz:
-            n_win = _apply_notches(n_win)
-            e_win = _apply_notches(e_win)
-            v_win = _apply_notches(v_win)
-
-        # anti-alias low-pass
-        if anti_aliasing_filter:
-            n_win = filtfilt(b_lp, a_lp, n_win)
-            e_win = filtfilt(b_lp, a_lp, e_win)
-            v_win = filtfilt(b_lp, a_lp, v_win)
-
         # per-window ASD
         if per_window_engine == "welch":
-            f_ref, Pnn = welch(n_win, fs=sampling_rate, window='hann', nperseg=nperseg//2, noverlap=(nperseg//2)//2)
-            _,   Pee = welch(e_win, fs=sampling_rate, window='hann', nperseg=nperseg//2, noverlap=(nperseg//2)//2)
-            _,   Pvv = welch(v_win, fs=sampling_rate, window='hann', nperseg=nperseg//2, noverlap=(nperseg//2)//2)
+            f_ref, Pnn = welch(n_win, fs=sampling_rate, window='hann', nperseg=nperseg//2, noverlap=(nperseg//2)//2, average="median")
+            _,   Pee = welch(e_win, fs=sampling_rate, window='hann', nperseg=nperseg//2, noverlap=(nperseg//2)//2, average="median")
+            _,   Pvv = welch(v_win, fs=sampling_rate, window='hann', nperseg=nperseg//2, noverlap=(nperseg//2)//2, average="median")
         else:
             f_ref, Pnn = periodogram(n_win, fs=sampling_rate, window='hann', scaling='density')
             _,   Pee = periodogram(e_win, fs=sampling_rate, window='hann', scaling='density')
@@ -513,8 +447,6 @@ def compute_hvsr(
         e_asd = np.sqrt(np.maximum(Pee, 0.0))
         v_asd = np.sqrt(np.maximum(Pvv, 0.0))
 
-        # Note: Frequency tapering will be applied AFTER smoothing to avoid artifacts
-
         if window_smoothing and window_smoothing_window > 1:
             n_asd = uniform_filter1d(n_asd, size=window_smoothing_window, mode='nearest')
             e_asd = uniform_filter1d(e_asd, size=window_smoothing_window, mode='nearest')
@@ -522,9 +454,7 @@ def compute_hvsr(
 
         h_asd = _combine_horizontal_from_amplitudes(n_asd, e_asd, horizontal_combine)
 
-        # guard against tiny V - more robust floor
-        eps = max(1e-12, np.percentile(v_asd, 10) * 1e-2)  # Use 10th percentile, larger factor
-        ratio = h_asd / np.maximum(v_asd, eps)
+        ratio = h_asd / v_asd 
 
         hvsr_matrix.append(ratio)
         h_amp_matrix.append(h_asd)
@@ -560,71 +490,90 @@ def compute_hvsr(
     h_amp_matrix = h_amp_matrix[:, mask]
     v_amp_matrix = v_amp_matrix[:, mask]
 
-    # stack
+    # Stack across windows
     hvsr_med = np.median(hvsr_matrix, axis=0)
     hvsr_mean = np.mean(hvsr_matrix, axis=0)
     hvsr_std = np.std(hvsr_matrix, axis=0)
 
+    # Log-mean (geometric mean) across windows
+    _eps = 1e-20
+    log_hvsr = np.log(np.maximum(hvsr_matrix, _eps))
+    hvsr_logmean = np.exp(np.mean(log_hvsr, axis=0))
+
     H_med = np.median(h_amp_matrix, axis=0)
     V_med = np.median(v_amp_matrix, axis=0)
 
-    # smooth ratio only (hvsrpy approach: form ratio first, then smooth)
-    # This avoids Jensen's inequality bias from smoothing H and V separately
-    if smoothing_method == "konno_ohmachi":
-        hvsr_smooth = obspy_ko_smoothing(hvsr_med, f, bandwidth=ko_bandwidth)
-        hvsr_mean_smooth = obspy_ko_smoothing(hvsr_mean, f, bandwidth=ko_bandwidth)
-        hvsr_std_smooth = obspy_ko_smoothing(hvsr_std, f, bandwidth=ko_bandwidth)
-    elif smoothing_method == "custom_ko":
-        hvsr_smooth = custom_konno_ohmachi_smoothing(hvsr_med, f, bandwidth=ko_bandwidth, method='improved')
-        hvsr_mean_smooth = custom_konno_ohmachi_smoothing(hvsr_mean, f, bandwidth=ko_bandwidth, method='improved')
-        hvsr_std_smooth = custom_konno_ohmachi_smoothing(hvsr_std, f, bandwidth=ko_bandwidth, method='improved')
-    elif smoothing_method == "custom_ko_smooth":
-        hvsr_smooth = custom_konno_ohmachi_smoothing(hvsr_med, f, bandwidth=ko_bandwidth, method='smooth')
-        hvsr_mean_smooth = custom_konno_ohmachi_smoothing(hvsr_mean, f, bandwidth=ko_bandwidth, method='smooth')
-        hvsr_std_smooth = custom_konno_ohmachi_smoothing(hvsr_std, f, bandwidth=ko_bandwidth, method='smooth')
+    # Smooth ratio only
+    if ko_center_frequencies is not None:
+        centers = np.asarray(ko_center_frequencies, dtype=float)
+        centers = centers[(centers >= f[0]) & (centers <= f[-1])]
+        if len(centers) == 0:
+            raise ValueError("ko_center_frequencies has no values inside the usable frequency band")
+
+        hvsr_med_smooth = konno_ohmachi_smoothing_to_centers(hvsr_med, f, centers, bandwidth=ko_bandwidth)
+        hvsr_mean_smooth = konno_ohmachi_smoothing_to_centers(hvsr_mean, f, centers, bandwidth=ko_bandwidth)
+        hvsr_std_smooth = konno_ohmachi_smoothing_to_centers(hvsr_std, f, centers, bandwidth=ko_bandwidth)
+        hvsr_logmean_smooth = konno_ohmachi_smoothing_to_centers(hvsr_logmean, f, centers, bandwidth=ko_bandwidth)
+
+        H_med_s = konno_ohmachi_smoothing_to_centers(H_med, f, centers, bandwidth=ko_bandwidth)
+        V_med_s = konno_ohmachi_smoothing_to_centers(V_med, f, centers, bandwidth=ko_bandwidth)
+
+        f_out = centers
+        H_out = H_med_s
+        V_out = V_med_s
     else:
-        hvsr_smooth = uniform_filter1d(hvsr_med, size=max(1, smoothing_window), mode='nearest')
-        hvsr_mean_smooth = uniform_filter1d(hvsr_mean, size=max(1, smoothing_window), mode='nearest')
-        hvsr_std_smooth = uniform_filter1d(hvsr_std, size=max(1, smoothing_window), mode='nearest')
-    
-    # Apply frequency tapering AFTER smoothing (hvsrpy approach)
-    if frequency_taper:
-        hvsr_smooth = _apply_frequency_taper(hvsr_smooth, f, max_frequency_ratio)
-        hvsr_mean_smooth = _apply_frequency_taper(hvsr_mean_smooth, f, max_frequency_ratio)
-        hvsr_std_smooth = _apply_frequency_taper(hvsr_std_smooth, f, max_frequency_ratio)
+        hvsr_med_smooth = custom_konno_ohmachi_smoothing(hvsr_med, f, bandwidth=ko_bandwidth)
+        hvsr_mean_smooth = custom_konno_ohmachi_smoothing(hvsr_mean, f, bandwidth=ko_bandwidth)
+        hvsr_std_smooth = custom_konno_ohmachi_smoothing(hvsr_std, f, bandwidth=ko_bandwidth)
+        hvsr_logmean_smooth = custom_konno_ohmachi_smoothing(hvsr_logmean, f, bandwidth=ko_bandwidth)
+        f_out = f
+        H_out = H_med
+        V_out = V_med
+
+    if stacking not in {"median", "mean", "logmean"}:
+        raise ValueError("stacking must be one of: 'median', 'mean', 'logmean'")
+
+    if stacking == "median":
+        hvsr_primary = hvsr_med_smooth
+    elif stacking == "mean":
+        hvsr_primary = hvsr_mean_smooth
+    else:  # "logmean"
+        hvsr_primary = hvsr_logmean_smooth
 
     meta = {
-        "method": "Window ASD ratio (median stack)",
+        "method": "Window ASD ratio (stacked)",
         "sampling_rate": sampling_rate,
         "window_length": window_length,
         "overlap": overlap,
-        "smoothing_method": smoothing_method,
-        "smoothing_window": smoothing_window,
         "ko_bandwidth": ko_bandwidth,
         "horizontal_combine": horizontal_combine,
-        "stack_method": stack_method,
         "n_windows_total": n_windows,
         "n_windows_accepted": hvsr_matrix.shape[0],
         "n_windows_rejected": n_windows - hvsr_matrix.shape[0],
-        "min_frequency_hz": float(f[0]),
-        "max_frequency_hz": float(f[-1]),
+        "min_frequency_hz": float(f_out[0]),
+        "max_frequency_hz": float(f_out[-1]),
+        "stacking": stacking,
+        "ko_center_frequencies": None if ko_center_frequencies is None else f"len={len(f_out)}",
         "per_window_engine": per_window_engine,
         "sta_lta_threshold": sta_lta_ratio_threshold,
+        "min_sta_lta_ratio": min_sta_lta_ratio,
+        "sta_window_seconds": sta_window_seconds,
+        "lta_window_seconds": lta_window_seconds,
+        "maximum_value_threshold": maximum_value_threshold,
+        "maximum_value_normalized": maximum_value_normalized,
+        "max_amplitude_threshold": max_amplitude_threshold,
+        "amplitude_threshold_factor": amplitude_threshold_factor,
+        "amplitude_global_cap": amplitude_global_cap,
         "window_smoothing": window_smoothing,
         "window_smoothing_window": window_smoothing_window,
-        "detrend_windows": detrend_windows,
-        "remove_mean": remove_mean,
         "max_frequency_ratio": max_frequency_ratio,
-        "frequency_taper": frequency_taper,
-        "anti_aliasing_filter": anti_aliasing_filter,
-        "notch_lines_hz": notch_lines_hz,
     }
     
     return HVSRResult(
-        frequencies=f,
-        hvsr_values=hvsr_smooth,
-        horizontal_spectrum=H_med,
-        vertical_spectrum=V_med,
+        frequencies=f_out,
+        hvsr_values=hvsr_primary,
+        horizontal_spectrum=H_out,
+        vertical_spectrum=V_out,
         metadata=meta,
         window_hvsr=hvsr_matrix,
         window_h_mean=h_amp_matrix,
@@ -756,43 +705,6 @@ def compute_hvsr_array(
         }
         stations_data.append(station_data)
     
-    # Process in parallel
     results_list = compute_hvsr_batch(stations_data, n_workers, use_threading, **kwargs)
     
-    # Convert to dictionary format
     return dict(results_list)
-
-
-def compute_hvsr_parallel(
-    horizontal_data,
-    vertical_data,
-    sampling_rate,
-    n_workers: Optional[int] = None,
-    **kwargs
-) -> HVSRResult:
-    """
-    Compute HVSR with internal parallelization for large arrays.
-    
-    This function automatically parallelizes the window processing loop
-    when the data is large enough to benefit from it.
-    
-    Parameters
-    ----------
-    horizontal_data, vertical_data, sampling_rate
-        Same as compute_hvsr()
-    n_workers : int, optional
-        Number of workers for internal parallelization
-    **kwargs
-        Additional arguments for compute_hvsr()
-        
-    Returns
-    -------
-    HVSRResult
-        HVSR computation result
-    """
-    # For now, this is a placeholder that calls the standard function
-    # Future enhancement: parallelize the window loop internally
-    if n_workers is not None:
-        print(f"Note: Internal parallelization not yet implemented. Using single-threaded processing.")
-    
-    return compute_hvsr(horizontal_data, vertical_data, sampling_rate, **kwargs)

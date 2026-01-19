@@ -19,7 +19,7 @@ A Python package for HVSR computation, supporting both single-station analysis a
 Install from source:
 
 ```bash
-git clone https://github.com/yourusername/hvsr-lite.git
+git clone https://github.com/Shihao-Yuan/hvsr-lite.git
 cd hvsr-lite
 pip install -e .
 ```
@@ -55,10 +55,11 @@ result = compute_hvsr(
     sampling_rate=sampling_rate,
     window_length=40.0,  # seconds
     overlap=0.5,  # 50% overlap
-    smoothing_method='custom_ko',  # improved Konno-Ohmachi
-    ko_bandwidth=40.0,  # smoothing bandwidth
+    ko_bandwidth=40.0,  # Konno-Ohmachi smoothing bandwidth
     min_frequency=0.1,  # Hz
-    max_frequency=20.0  # Hz
+    max_frequency=20.0,  # Hz
+    horizontal_combine="geometric_mean", # "geometric_mean" or "quadratic_mean"
+    stacking="logmean"  # "logmean", "median", or "mean"
 )
 
 # Access results
@@ -101,23 +102,28 @@ results = compute_hvsr_array(array_data, ['A001', 'A002'], n_workers=4)
 Main function for HVSR computation with extensive parameter control:
 
 **Parameters:**
-- `horizontal_data` - North and East component data (2D array or 1D)
+- `horizontal_data` - North and East component data (2D array [n_samples, 2] or 1D)
 - `vertical_data` - Vertical component data (1D array)
 - `sampling_rate` - Sampling rate in Hz
 - `window_length` - Time window length in seconds (default: 60.0)
 - `overlap` - Window overlap fraction (default: 0.66)
-- `smoothing_method` - Smoothing method: 'custom_ko', 'custom_ko_smooth', 'moving_average', 'konno_ohmachi'
-- `ko_bandwidth` - Konno-Ohmachi bandwidth parameter (default: 40.0)
+- `horizontal_combine` - Method to combine horizontal components: 'quadratic_mean' (default) or 'geometric_mean'
+- `ko_bandwidth` - Konno-Ohmachi smoothing bandwidth parameter (default: 40.0)
+- `stacking` - Method to stack windows: 'logmean' (default, geometric mean), 'median', or 'mean'
 - `min_frequency` - Minimum frequency in Hz (default: 0.1)
 - `max_frequency` - Maximum frequency in Hz (default: None)
-- And many more QC and processing options...
+- `sta_lta_ratio_threshold` - Maximum STA/LTA ratio for window rejection (default: 2.5)
+- `per_window_engine` - PSD engine for per-window spectra: 'periodogram' (default) or 'welch'
+- And many more QC and processing options (adaptive amplitude thresholding, frequency ratio limits, etc.)
 
 **Returns:**
 - `HVSRResult` object with:
   - `frequencies` - Frequency array
-  - `hvsr_values` - Smoothed HVSR curve (recommended for inversion)
+  - `hvsr_values` - Smoothed HVSR curve
   - `hvsr_mean` - Mean HVSR across windows
   - `hvsr_std` - Standard deviation
   - `window_hvsr` - Individual window HVSR curves
-  - `metadata` - Processing metadata
+  - `horizontal_spectrum` - Smoothed horizontal amplitude spectrum
+  - `vertical_spectrum` - Smoothed vertical amplitude spectrum
+  - `metadata` - Dictionary of processing parameters and stats
 
