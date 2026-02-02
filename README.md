@@ -21,7 +21,7 @@ Install from source:
 ```bash
 git clone https://github.com/Shihao-Yuan/hvsr-lite.git
 cd hvsr-lite
-pip install -e .
+python -m pip install .
 ```
 
 ## Quick Start
@@ -54,7 +54,7 @@ result = compute_hvsr(
     vertical_data=vertical_data,
     sampling_rate=sampling_rate,
     window_length=40.0,  # seconds
-    overlap=0.5,  # 50% overlap
+    overlap=0.2,  # 50% overlap
     ko_bandwidth=40.0,  # Konno-Ohmachi smoothing bandwidth
     min_frequency=0.1,  # Hz
     max_frequency=20.0,  # Hz
