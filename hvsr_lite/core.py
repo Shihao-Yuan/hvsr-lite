@@ -269,15 +269,15 @@ def compute_hvsr(
     horizontal_data,
     vertical_data,
     sampling_rate,
-    window_length: float = 60.0,
-    overlap: float = 0.66,
+    window_length: float = 100.0,
+    overlap: float = 0.1,
     *,
     horizontal_combine: str = "quadratic_mean",   # "quadratic_mean" | "geometric_mean"
     ko_bandwidth: float = 40.0,  # Konno-Ohmachi smoothing bandwidth parameter
     # QC - STA/LTA
-    sta_lta_ratio_threshold: float = 2.5,     # Maximum STA/LTA ratio
+    sta_lta_ratio_threshold: float = 4.0,     # Maximum STA/LTA ratio
     min_sta_lta_ratio: float = 0.2,           # Minimum STA/LTA ratio
-    sta_window_seconds: float = 1.0,          # STA window duration in seconds
+    sta_window_seconds: float = 2.0,          # STA window duration in seconds
     lta_window_seconds: float = 30.0,         # LTA window duration in seconds
     # QC - Maximum Value Window Rejection
     maximum_value_threshold: float | None = None,  # Maximum (optionally normalized) amplitude threshold
@@ -433,7 +433,6 @@ def compute_hvsr(
                 rejected += 1
                 continue
 
-        # per-window ASD
         if per_window_engine == "welch":
             f_ref, Pnn = welch(n_win, fs=sampling_rate, window='hann', nperseg=nperseg//2, noverlap=(nperseg//2)//2, average="median")
             _,   Pee = welch(e_win, fs=sampling_rate, window='hann', nperseg=nperseg//2, noverlap=(nperseg//2)//2, average="median")
@@ -537,12 +536,12 @@ def compute_hvsr(
         hvsr_primary = hvsr_med_smooth
     elif stacking == "mean":
         hvsr_primary = hvsr_mean_smooth
-    else:  # "logmean"
+    elif stacking == "logmean": 
         hvsr_primary = hvsr_logmean_smooth
+    else:
+        raise ValueError("stacking must be one of: 'median', 'mean', 'logmean'")
 
     meta = {
-        "method": "Window ASD ratio (stacked)",
-        "sampling_rate": sampling_rate,
         "window_length": window_length,
         "overlap": overlap,
         "ko_bandwidth": ko_bandwidth,
