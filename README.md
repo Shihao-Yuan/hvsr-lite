@@ -4,7 +4,7 @@
 
 A Python package for HVSR computation, supporting both single-station analysis and batch processing of dense nodal array data.
 
-**Author:** Shihao Yuan (syuan@mines.edu)
+**Author:** Shihao Yuan (shihao.yuan@univ-grenoble-alpes.fr)
 
 > **DISCLAIMER:** This is a development build. The code may contain errors or unstable functionality. Contributions and feedback are welcome.
 
